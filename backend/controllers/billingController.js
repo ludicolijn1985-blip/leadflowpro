@@ -1,31 +1,42 @@
 import { config } from "../config.js";
 import { appError } from "../lib/errors.js";
-import { logInfo, logWarn } from "../lib/logger.js";
+import { logInfo, logWarn, logError } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
 import { stripe } from "../lib/stripe.js";
 import { isCuidLike } from "../lib/validation.js";
-const HANDLED_EVENTS = new Set(["checkout.session.completed", "invoice.payment_succeeded"]);
 
+const HANDLED_EVENTS = new Set([
+  "checkout.session.completed",
+  "invoice.payment_succeeded"
+]);
+
+// 🔥 HARDENED IDEMPOTENCY (RACE SAFE)
 async function markEventProcessed(eventId) {
   try {
-    await prisma.webhookEvent.create({ data: { id: eventId } });
-    return true;
+    await prisma.webhookEvent.create({
+      data: { id: eventId }
+    });
+    return true; // first time → process
   } catch (error) {
+    // Prisma unique constraint
     if (error.code === "P2002") {
-      return false;
+      return false; // duplicate → skip
     }
+
+    logError("Webhook event insert failed", { eventId, error: error.message });
     throw error;
   }
 }
 
 async function upgradeUserToProById(userId) {
-  if (!userId) {
-    return;
-  }
+  if (!userId) return;
 
   const user = await prisma.user.update({
     where: { id: userId },
-    data: { role: "PRO", trialEnd: null }
+    data: {
+      role: "PRO",
+      trialEnd: null
+    }
   });
 
   if (user.referredBy) {
@@ -41,14 +52,13 @@ async function upgradeUserToProById(userId) {
 }
 
 async function upgradeUserToProByCustomer(customerId) {
-  if (!customerId) {
-    return;
-  }
+  if (!customerId) return;
 
-  const user = await prisma.user.findFirst({ where: { stripeCustomerId: customerId } });
-  if (!user) {
-    return;
-  }
+  const user = await prisma.user.findFirst({
+    where: { stripeCustomerId: customerId }
+  });
+
+  if (!user) return;
 
   await upgradeUserToProById(user.id);
 }
@@ -89,6 +99,7 @@ export async function createCheckoutSession(req, res, next) {
   }
 }
 
+// 🔥 ULTRA STABLE WEBHOOK HANDLER
 export async function handleStripeWebhook(req, res, next) {
   try {
     const signature = req.headers["stripe-signature"];
@@ -96,24 +107,41 @@ export async function handleStripeWebhook(req, res, next) {
       return next(appError(400, "Missing Stripe signature", "BILLING_MISSING_SIGNATURE"));
     }
 
-    const event = stripe.webhooks.constructEvent(req.body, signature, config.stripeWebhookSecret);
-    logInfo("Stripe webhook received", { eventId: event.id, eventType: event.type });
+    const event = stripe.webhooks.constructEvent(
+      req.body,
+      signature,
+      config.stripeWebhookSecret
+    );
+
+    logInfo("Stripe webhook received", {
+      eventId: event.id,
+      eventType: event.type
+    });
 
     if (!HANDLED_EVENTS.has(event.type)) {
-      logWarn("Stripe webhook ignored", { eventId: event.id, eventType: event.type });
       return res.json({ received: true, ignored: true });
     }
 
+    // 🔥 CRITICAL: IDEMPOTENCY CHECK
     const shouldProcess = await markEventProcessed(event.id);
 
     if (!shouldProcess) {
-      logWarn("Stripe webhook duplicate ignored", { eventId: event.id, eventType: event.type });
+      logWarn("Duplicate webhook skipped", {
+        eventId: event.id,
+        eventType: event.type
+      });
+
       return res.json({ received: true, duplicate: true });
     }
 
+    // 🔥 PROCESS EVENTS SAFELY
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
-      const userId = session.metadata?.userId || session.client_reference_id;
+
+      const userId =
+        session.metadata?.userId ||
+        session.client_reference_id;
+
       if (userId) {
         await upgradeUserToProById(userId);
       }
@@ -121,18 +149,31 @@ export async function handleStripeWebhook(req, res, next) {
       if (userId && session.customer) {
         await prisma.user.update({
           where: { id: userId },
-          data: { stripeCustomerId: String(session.customer) }
+          data: {
+            stripeCustomerId: String(session.customer)
+          }
         });
       }
 
-      logInfo("User upgraded from checkout session", { eventId: event.id, userId });
+      logInfo("User upgraded from checkout", {
+        eventId: event.id,
+        userId
+      });
     }
 
     if (event.type === "invoice.payment_succeeded") {
       const invoice = event.data.object;
-      const customerId = invoice.customer ? String(invoice.customer) : "";
+
+      const customerId = invoice.customer
+        ? String(invoice.customer)
+        : "";
+
       await upgradeUserToProByCustomer(customerId);
-      const user = await prisma.user.findFirst({ where: { stripeCustomerId: customerId } });
+
+      const user = await prisma.user.findFirst({
+        where: { stripeCustomerId: customerId }
+      });
+
       if (user) {
         await prisma.invoiceRecord.create({
           data: {
@@ -143,17 +184,28 @@ export async function handleStripeWebhook(req, res, next) {
           }
         });
       }
-      logInfo("User upgraded from invoice payment", { eventId: event.id, customerId });
+
+      logInfo("Invoice processed", {
+        eventId: event.id,
+        customerId
+      });
     }
 
     return res.json({ received: true });
   } catch (error) {
     if (error.type && error.type.startsWith("Stripe")) {
-      return next(appError(400, "Invalid Stripe webhook payload", "BILLING_WEBHOOK_INVALID"));
+      return next(
+        appError(400, "Invalid Stripe webhook payload", "BILLING_WEBHOOK_INVALID")
+      );
     }
+
+    logError("Webhook processing failed", {
+      error: error.message
+    });
 
     error.status = error.status || 500;
     error.code = error.code || "BILLING_WEBHOOK_ERROR";
+
     return next(error);
   }
 }
@@ -171,7 +223,10 @@ export async function listBillingHistory(req, res, next) {
       })
     ]);
 
-    return res.json({ invoices, referralEarnings: earnings });
+    return res.json({
+      invoices,
+      referralEarnings: earnings
+    });
   } catch (error) {
     return next(error);
   }
