@@ -10,17 +10,14 @@ const HANDLED_EVENTS = new Set([
   "invoice.payment_succeeded"
 ]);
 
-// 🔥 HARDENED IDEMPOTENCY (RACE SAFE)
+// 🔥 DEFINITIEVE IDEMPOTENCY FIX (GEEN DB ERRORS MEER)
 async function markEventProcessed(eventId) {
-  try {
-    await prisma.webhookEvent.create({
-      data: { id: eventId }
-    });
-    return true;
-  } catch (error) {
-    // altijd duplicate skippen → geen crash
-    return false;
-  }
+  const result = await prisma.webhookEvent.createMany({
+    data: [{ id: eventId }],
+    skipDuplicates: true
+  });
+
+  return result.count === 1;
 }
 
 async function upgradeUserToProById(userId) {
@@ -94,7 +91,6 @@ export async function createCheckoutSession(req, res, next) {
   }
 }
 
-// 🔥 ULTRA STABLE WEBHOOK HANDLER
 export async function handleStripeWebhook(req, res, next) {
   try {
     const signature = req.headers["stripe-signature"];
@@ -117,7 +113,6 @@ export async function handleStripeWebhook(req, res, next) {
       return res.json({ received: true, ignored: true });
     }
 
-    // 🔥 CRITICAL: IDEMPOTENCY CHECK
     const shouldProcess = await markEventProcessed(event.id);
 
     if (!shouldProcess) {
@@ -129,7 +124,7 @@ export async function handleStripeWebhook(req, res, next) {
       return res.json({ received: true, duplicate: true });
     }
 
-    // 🔥 PROCESS EVENTS SAFELY
+    // 🔥 EVENT HANDLING
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
