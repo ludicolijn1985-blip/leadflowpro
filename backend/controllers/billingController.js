@@ -12,12 +12,19 @@ const HANDLED_EVENTS = new Set([
 
 // 🔥 DEFINITIEVE IDEMPOTENCY FIX (GEEN DB ERRORS MEER)
 async function markEventProcessed(eventId) {
-  const result = await prisma.webhookEvent.createMany({
-    data: [{ id: eventId }],
-    skipDuplicates: true
+  const existing = await prisma.webhookEvent.findUnique({
+    where: { id: eventId }
   });
 
-  return result.count === 1;
+  if (existing) {
+    return false; // duplicate → niets doen
+  }
+
+  await prisma.webhookEvent.create({
+    data: { id: eventId }
+  });
+
+  return true;
 }
 
 async function upgradeUserToProById(userId) {
