@@ -16,15 +16,10 @@ async function markEventProcessed(eventId) {
     await prisma.webhookEvent.create({
       data: { id: eventId }
     });
-    return true; // first time → process
+    return true;
   } catch (error) {
-    // Prisma unique constraint
-    if (error.code === "P2002") {
-      return false; // duplicate → skip
-    }
-
-    logError("Webhook event insert failed", { eventId, error: error.message });
-    throw error;
+    // altijd duplicate skippen → geen crash
+    return false;
   }
 }
 
