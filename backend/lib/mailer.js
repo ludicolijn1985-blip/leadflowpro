@@ -62,16 +62,18 @@ async function sendWithRetry(payload) {
   return false;
 }
 
-export async function verifySmtpConnection() {
+// ✅ MOCKABLE EXPORT
+export const verifySmtpConnection = async () => {
   try {
     await ensureSmtpReady();
     logInfo("SMTP connection verified");
   } catch (error) {
     throw appError(500, "SMTP verification failed", "SMTP_VERIFY_FAILED");
   }
-}
+};
 
-export async function sendBulkEmail({ recipients, subject, html }) {
+// 🔥 BELANGRIJKSTE FIX
+export const sendBulkEmail = async ({ recipients, subject, html }) => {
   if (!Array.isArray(recipients) || recipients.length === 0) {
     return { sent: 0, failed: 0 };
   }
@@ -82,6 +84,7 @@ export async function sendBulkEmail({ recipients, subject, html }) {
 
   for (let index = 0; index < recipients.length; index += BATCH_SIZE) {
     const batch = recipients.slice(index, index + BATCH_SIZE);
+
     const results = await Promise.all(
       batch.map((to) =>
         sendWithRetry({
@@ -94,11 +97,8 @@ export async function sendBulkEmail({ recipients, subject, html }) {
     );
 
     for (const ok of results) {
-      if (ok) {
-        sent += 1;
-      } else {
-        failed += 1;
-      }
+      if (ok) sent++;
+      else failed++;
     }
   }
 
@@ -113,4 +113,4 @@ export async function sendBulkEmail({ recipients, subject, html }) {
   }
 
   return { sent, failed };
-}
+};
